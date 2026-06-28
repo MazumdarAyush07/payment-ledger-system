@@ -24,18 +24,18 @@ Use this file as the working checklist. Complete each phase in order and tick it
 ## Phase 0 — Project Setup
 **Goal:** Reproducible local dev foundation in Go.
 
-- [ ] Create repo structure (`cmd/`, `internal/ledger/`, `internal/api/`, `internal/db/`, `migrations/`, `tests/`)
-- [ ] Initialize Go module (`go mod init github.com/<you>/payment-ledger`)
-- [ ] Add `.env.example` (`DATABASE_URL`)
-- [ ] Add Docker Compose for PostgreSQL
-- [ ] Pick and add a migration tool (`golang-migrate` or `goose` — either is fine, pick one and move on)
-- [ ] Add `README.md` stub explaining what the project is and why (you'll flesh this out in Phase 7)
+- [x] Create repo structure (`cmd/`, `internal/ledger/`, `internal/api/`, `internal/db/`, `migrations/`, `tests/`)
+- [x] Initialize Go module (`go mod init github.com/<you>/payment-ledger`)
+- [x] Add `.env.example` (`DATABASE_URL`)
+- [x] Add Docker Compose for PostgreSQL
+- [x] Pick and add a migration tool (`golang-migrate` or `goose` — either is fine, pick one and move on)
+- [x] Add `README.md` stub explaining what the project is and why (you'll flesh this out in Phase 7)
 
 **Deliverable:** `docker-compose up` gives you a running Postgres instance; `go run cmd/server/main.go` connects to it.
 
 **Done when:** local app can connect to Postgres and run a migration.
 
-> Status: Not started.
+> Status: ✅ Complete.
 
 ---
 
@@ -222,7 +222,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 ---
 
 ## Master Checklist (Quick Progress View)
-- [ ] Phase 0 — Project setup complete
+- [x] Phase 0 — Project setup complete
 - [ ] Phase 1 — Data contracts frozen and understood
 - [ ] Phase 2 — Schema + migrations complete
 - [ ] Phase 3 — Core ledger engine tested in isolation
