@@ -67,15 +67,18 @@ for interviews.
 ## Phase 2 — PostgreSQL Schema & Migrations
 **Goal:** Translate Phase 1 contracts into a normalized schema.
 
-- [ ] `accounts` table: `id`, `name`, `account_type`, `currency`, `created_at`
-- [ ] `transactions` table: `id`, `idempotency_key` (unique), `description`, `status`
-  (`pending`/`posted`/`failed`), `created_at`
-- [ ] `entries` table: `id`, `transaction_id` (FK), `account_id` (FK), `amount` (signed integer,
-  minor units), `created_at`
-- [ ] Unique constraint on `transactions.idempotency_key`
-- [ ] Index on `entries.account_id` (you'll query "all entries for account X" constantly)
-- [ ] Index on `entries.transaction_id`
-- [ ] Write the first migration and confirm it runs clean on an empty DB
+- [x] Create enums: `account_type` (`asset`, `liability`, `equity`, `revenue`, `expense`),
+  `transaction_status` (`pending`, `posted`, `failed`), `rate_source` (`live`, `stale_cache`)
+- [x] `accounts` table: `id` (UUID PK), `name`, `account_type`, `currency` (ISO 4217), `created_at` (UTC)
+- [x] `transactions` table: `id` (UUID PK), `idempotency_key` (unique), `description`,
+  `status` (`pending`/`posted`/`failed`), `exchange_rate` (nullable float8),
+  `rate_source` (nullable enum), `created_at` (UTC), `posted_at` (nullable UTC)
+- [x] `entries` table: `id` (UUID PK), `transaction_id` (FK), `account_id` (FK),
+  `amount` (int8, signed minor units), `created_at` (UTC)
+- [x] Unique constraint on `transactions.idempotency_key`
+- [x] Index on `entries.account_id` (you'll query "all entries for account X" constantly)
+- [x] Index on `entries.transaction_id`
+- [x] Write the first migration and confirm it runs clean on an empty DB
 
 **Deliverable:** migration files + a simple ERD (even a hand-drawn or text-based one is fine —
 this isn't a deliverable anyone external sees).
@@ -83,7 +86,7 @@ this isn't a deliverable anyone external sees).
 **Done when:** migrations run clean on empty DB and match the Phase 1 contracts exactly. If
 something doesn't fit the schema, go back and fix the contract — don't let schema drift from intent.
 
-> Status: Not started.
+> Status: ✅ Complete. Migration `00001_init_schema.sql` ran in 13ms on Docker Postgres.
 
 ---
 
@@ -253,7 +256,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 ## Master Checklist (Quick Progress View)
 - [x] Phase 0 — Project setup complete
 - [x] Phase 1 — Data contracts frozen and understood
-- [ ] Phase 2 — Schema + migrations complete
+- [x] Phase 2 — Schema + migrations complete
 - [ ] Phase 3 — Core ledger engine tested in isolation
 - [ ] Phase 4 — Idempotency enforced and race-condition tested
 - [ ] Phase 5 — REST API complete
