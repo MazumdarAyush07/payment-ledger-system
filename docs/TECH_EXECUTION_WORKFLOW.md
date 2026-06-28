@@ -43,16 +43,16 @@ Use this file as the working checklist. Complete each phase in order and tick it
 **Goal:** Define exactly what a "ledger" means before writing any schema or code. This is the
 phase people skip and regret — get the concepts right here, not while debugging a bug later.
 
-- [ ] Define core entities: `Account`, `Transaction`, `Entry` (a transaction has 2+ entries; entries are the actual debits/credits)
-- [ ] Write down, in plain English, the **double-entry invariant**: for every transaction, the sum
+- [x] Define core entities: `Account`, `Transaction`, `Entry` (a transaction has 2+ entries; entries are the actual debits/credits)
+- [x] Write down, in plain English, the **double-entry invariant**: for every transaction, the sum
   of all entry amounts must equal zero (debits and credits balance)
-- [ ] Define `account_type` enum (e.g. `asset`, `liability`, `equity` — even a simplified 2–3 type
+- [x] Define `account_type` enum (e.g. `asset`, `liability`, `equity` — even a simplified 2–3 type
   set is fine for v1) and what "balance" means per type
-- [ ] Define what an **idempotency key** is and exactly where it's checked (at transaction creation,
+- [x] Define what an **idempotency key** is and exactly where it's checked (at transaction creation,
   scoped per client/request, not per entry)
-- [ ] Define currency handling: store amounts as integer minor units (paise/cents), never floats —
+- [x] Define currency handling: store amounts as integer minor units (paise/cents), never floats —
   write down *why* in your own words
-- [ ] Define timestamp standard (UTC) and what "transaction time" vs "posted time" means
+- [x] Define timestamp standard (UTC) and what "transaction time" vs "posted time" means
 
 **Deliverable:** `docs/data_contracts.md` — a short doc, not a spec novel. 1–2 pages.
 
@@ -60,7 +60,7 @@ phase people skip and regret — get the concepts right here, not while debuggin
 looking at notes. If you can't, this phase isn't done — this is the part that actually matters
 for interviews.
 
-> Status: Not started.
+> Status: ✅ Complete.
 
 ---
 
@@ -158,6 +158,35 @@ correct error codes for bad input.
 
 ---
 
+## Phase 5.5 — Currency Conversion Module
+**Goal:** Integrate an external exchange rate API to support cross-currency transactions,
+with a layered fallback strategy that keeps the system available even when the external
+service is down. Demonstrates real HTTP client engineering, graceful degradation, and
+caching patterns.
+
+- [ ] Create `internal/currency/` package — zero dependency on ledger or API packages
+- [ ] Implement `RateService` that fetches live rates from `frankfurter.app` (free, no key required)
+  - `GET https://api.frankfurter.app/latest?from=USD&to=INR`
+- [ ] Add in-memory rate cache with a **1-hour TTL** (use `sync.Mutex` + timestamp, no Redis)
+- [ ] Implement **layered fallback strategy**:
+  1. Try primary API (3-second timeout)
+  2. On failure → serve stale cache **if age < 24 hours** (`rate_source: stale_cache`)
+  3. No cache or cache > 24 hours old → hard fail with `503 Service Unavailable`
+- [ ] Expose `Convert(amount int64, from, to string) (int64, Rate, error)` — pure function, testable
+- [ ] Store `exchange_rate` (float64) and `rate_source` (`live` / `stale_cache`) on the transaction
+- [ ] Wire into API layer: pre-convert amounts before handing entries to ledger engine
+- [ ] Unit tests for the fallback logic (mock the HTTP client)
+
+**Deliverable:** `internal/currency/` package with live rate fetching, in-memory caching, and
+stale-cache fallback. Cross-currency transactions store the rate used for full auditability.
+
+**Done when:** A cross-currency `POST /transactions` succeeds with live rates, and a mocked
+API-down scenario correctly serves a stale cached rate (or fails cleanly if cache is too old).
+
+> Status: Not started.
+
+---
+
 ## Phase 6 — Tests & Invariant Checks
 **Goal:** Prove correctness, not just "it runs." This phase is what makes the project credible
 in an interview — "I wrote tests proving the ledger can never go out of balance" is a strong line.
@@ -208,7 +237,7 @@ data model, the invariant, idempotency, and one concurrency edge case you handle
 Keeping this list visible is intentional — scope creep is the main risk to actually finishing.
 
 - Authentication/authorization (not the point of this project — skip it)
-- Multi-currency conversion logic
+- ~~Multi-currency conversion logic~~ → **Moved in-scope as Phase 5.5**
 - Webhooks/notifications
 - A frontend/UI
 - Reversals/refunds as a separate concept (a reversal is just another balanced transaction —
@@ -223,14 +252,14 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 
 ## Master Checklist (Quick Progress View)
 - [x] Phase 0 — Project setup complete
-- [ ] Phase 1 — Data contracts frozen and understood
+- [x] Phase 1 — Data contracts frozen and understood
 - [ ] Phase 2 — Schema + migrations complete
 - [ ] Phase 3 — Core ledger engine tested in isolation
 - [ ] Phase 4 — Idempotency enforced and race-condition tested
 - [ ] Phase 5 — REST API complete
+- [ ] Phase 5.5 — Currency conversion module with fallback strategy
 - [ ] Phase 6 — Invariant + concurrency tests passing
 - [ ] Phase 7 — README, design notes, and demo-ready
 
 ## Next Immediate Action
-1. **Phase 0** — Set up the repo structure, Docker Compose Postgres, and confirm `go run` connects.
-   Don't open Phase 1 until this is genuinely working end-to-end.
+1. **Phase 2** — Write the PostgreSQL schema and first migration. Run it clean on the Docker Postgres instance.
