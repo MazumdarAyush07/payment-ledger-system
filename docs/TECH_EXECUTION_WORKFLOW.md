@@ -1,0 +1,236 @@
+# Payment Ledger System (Go) — Tech Execution Workflow
+
+**Type:** Learning project — Path B portfolio piece for backend/payments roles
+**Goal:** Build a correct, idempotent, double-entry payment ledger backend in Go, deep enough to
+speak to in interviews and demo live, shallow enough to actually finish in 2–3 weeks of
+consistent evening work.
+
+Use this file as the working checklist. Complete each phase in order and tick items as done.
+
+## Rules of Execution
+- Build in this sequence: **Data Contracts → DB Schema → Core Ledger Engine → Idempotency Layer →
+  API → Tests/Invariants → Concurrency Hardening → Polish/Demo**.
+- Every phase must have a clear "Done" outcome before moving forward.
+- No API work until the ledger engine and DB schema are correct and tested in isolation.
+- This is a learning project, not a product: prioritize understanding *why* each piece exists
+  (why idempotency keys, why double-entry, why not just a `balance` column) over speed.
+- Keep a `NOTES.md` alongside this file — for every phase, write 3–5 lines on what you learned
+  and what confused you. This is what you'll actually talk about in interviews, not the code itself.
+- Local/dev runs use `.env` (DB URL); no cloud deployment required for v1 — this is a portfolio
+  piece, not a hosted product.
+
+---
+
+## Phase 0 — Project Setup
+**Goal:** Reproducible local dev foundation in Go.
+
+- [ ] Create repo structure (`cmd/`, `internal/ledger/`, `internal/api/`, `internal/db/`, `migrations/`, `tests/`)
+- [ ] Initialize Go module (`go mod init github.com/<you>/payment-ledger`)
+- [ ] Add `.env.example` (`DATABASE_URL`)
+- [ ] Add Docker Compose for PostgreSQL
+- [ ] Pick and add a migration tool (`golang-migrate` or `goose` — either is fine, pick one and move on)
+- [ ] Add `README.md` stub explaining what the project is and why (you'll flesh this out in Phase 7)
+
+**Deliverable:** `docker-compose up` gives you a running Postgres instance; `go run cmd/server/main.go` connects to it.
+
+**Done when:** local app can connect to Postgres and run a migration.
+
+> Status: Not started.
+
+---
+
+## Phase 1 — Data Contracts (Start Here)
+**Goal:** Define exactly what a "ledger" means before writing any schema or code. This is the
+phase people skip and regret — get the concepts right here, not while debugging a bug later.
+
+- [ ] Define core entities: `Account`, `Transaction`, `Entry` (a transaction has 2+ entries; entries are the actual debits/credits)
+- [ ] Write down, in plain English, the **double-entry invariant**: for every transaction, the sum
+  of all entry amounts must equal zero (debits and credits balance)
+- [ ] Define `account_type` enum (e.g. `asset`, `liability`, `equity` — even a simplified 2–3 type
+  set is fine for v1) and what "balance" means per type
+- [ ] Define what an **idempotency key** is and exactly where it's checked (at transaction creation,
+  scoped per client/request, not per entry)
+- [ ] Define currency handling: store amounts as integer minor units (paise/cents), never floats —
+  write down *why* in your own words
+- [ ] Define timestamp standard (UTC) and what "transaction time" vs "posted time" means
+
+**Deliverable:** `docs/data_contracts.md` — a short doc, not a spec novel. 1–2 pages.
+
+**Done when:** you can explain the double-entry invariant and idempotency model out loud without
+looking at notes. If you can't, this phase isn't done — this is the part that actually matters
+for interviews.
+
+> Status: Not started.
+
+---
+
+## Phase 2 — PostgreSQL Schema & Migrations
+**Goal:** Translate Phase 1 contracts into a normalized schema.
+
+- [ ] `accounts` table: `id`, `name`, `account_type`, `currency`, `created_at`
+- [ ] `transactions` table: `id`, `idempotency_key` (unique), `description`, `status`
+  (`pending`/`posted`/`failed`), `created_at`
+- [ ] `entries` table: `id`, `transaction_id` (FK), `account_id` (FK), `amount` (signed integer,
+  minor units), `created_at`
+- [ ] Unique constraint on `transactions.idempotency_key`
+- [ ] Index on `entries.account_id` (you'll query "all entries for account X" constantly)
+- [ ] Index on `entries.transaction_id`
+- [ ] Write the first migration and confirm it runs clean on an empty DB
+
+**Deliverable:** migration files + a simple ERD (even a hand-drawn or text-based one is fine —
+this isn't a deliverable anyone external sees).
+
+**Done when:** migrations run clean on empty DB and match the Phase 1 contracts exactly. If
+something doesn't fit the schema, go back and fix the contract — don't let schema drift from intent.
+
+> Status: Not started.
+
+---
+
+## Phase 3 — Core Ledger Engine (No API Yet)
+**Goal:** Implement the actual ledger logic as a Go package you can unit test in isolation,
+before any HTTP layer touches it. This is the heart of the project.
+
+- [ ] `internal/ledger/post_transaction.go`: function that takes a list of entries, validates the
+  double-entry invariant (sum = 0), and inserts the transaction + entries atomically (DB transaction)
+- [ ] Reject any transaction where entries don't sum to zero — write the validation as its own
+  testable function, not buried inside the DB call
+- [ ] `internal/ledger/get_balance.go`: compute an account's balance by summing its entries
+  (don't store a denormalized `balance` column yet — derive it; this is the "correct but slow"
+  version, and that's intentional for v1)
+- [ ] `internal/ledger/get_statement.go`: return an account's entries in a date range (basic
+  transaction history)
+- [ ] Wrap each operation in a DB transaction (`BEGIN`/`COMMIT`/`ROLLBACK`) — if any entry insert
+  fails, the whole transaction must roll back
+
+**Deliverable:** a `ledger` package with no HTTP/API dependency, fully testable on its own.
+
+**Done when:** you can call `PostTransaction(...)` from a Go test file and see correct rows land
+in Postgres, with an unbalanced transaction correctly rejected.
+
+> Status: Not started.
+
+---
+
+## Phase 4 — Idempotency Layer
+**Goal:** Make `PostTransaction` safe to call twice with the same key — this is the single most
+important "real payments system" behavior to demonstrate.
+
+- [ ] Before inserting, check if `idempotency_key` already exists
+- [ ] If it exists: return the *original* transaction's result, do not re-process
+- [ ] If it doesn't exist: proceed with Phase 3 logic
+- [ ] Handle the race condition: two concurrent requests with the same key should not both pass
+  the "doesn't exist" check and double-insert — use the unique constraint from Phase 2 as the
+  actual safety net (catch the constraint violation, fetch and return the existing transaction)
+- [ ] Write a test that fires the same request twice (sequentially) and asserts only one
+  transaction + entry set exists
+
+**Deliverable:** idempotency is enforced at the DB constraint level, not just app-level checks
+(app-level checks alone are not safe under concurrency — this is the actual lesson of this phase).
+
+**Done when:** posting the same idempotency key twice produces one transaction, not two, even if
+you call it concurrently from two goroutines in a test.
+
+> Status: Not started.
+
+---
+
+## Phase 5 — REST API
+**Goal:** Expose the ledger engine over HTTP. Keep the API thin — it should call into the
+`ledger` package, not contain business logic itself.
+
+- [ ] `POST /accounts` — create an account
+- [ ] `GET /accounts/{id}/balance` — current balance
+- [ ] `GET /accounts/{id}/statement` — entry history (paginated)
+- [ ] `POST /transactions` — post a transaction (body includes `idempotency_key`, `entries[]`)
+  - Required header: `Idempotency-Key` (standard practice — mirror how Stripe does it)
+- [ ] `GET /transactions/{id}` — fetch a transaction and its entries
+- [ ] Basic input validation middleware (malformed amounts, missing fields → 400, not 500)
+- [ ] Consistent error response shape (`{"error": "..."}`) across all endpoints
+
+**Deliverable:** a running HTTP server (use `net/http` + a light router like `chi`, or `Gin`/`Fiber`
+if you prefer — either is a reasonable, defensible choice).
+
+**Done when:** you can `curl` every endpoint above and get correct, sane responses, including
+correct error codes for bad input.
+
+> Status: Not started.
+
+---
+
+## Phase 6 — Tests & Invariant Checks
+**Goal:** Prove correctness, not just "it runs." This phase is what makes the project credible
+in an interview — "I wrote tests proving the ledger can never go out of balance" is a strong line.
+
+- [ ] Unit tests for `PostTransaction` (balanced entries succeed, unbalanced entries rejected)
+- [ ] Unit tests for idempotency (duplicate key → same result, no duplicate rows)
+- [ ] Integration test: post 50+ random valid transactions across a handful of accounts, then
+  assert the **global invariant**: sum of all entries across the entire ledger = 0
+- [ ] Concurrency test: fire N concurrent `PostTransaction` calls (some with shared idempotency
+  keys, some without) and assert no double-processing and no constraint violations crash the app
+- [ ] Basic API-level tests (httptest) for the main happy paths and 1–2 error paths per endpoint
+
+**Deliverable:** `go test ./...` passes, with the global balance invariant test as the centerpiece.
+
+**Done when:** the invariant test (`sum of all entries = 0` after random transaction load) passes
+reliably, including under the concurrency test.
+
+> Status: Not started.
+
+---
+
+## Phase 7 — Polish & Demo Readiness
+**Goal:** Make the project legible to someone skimming your GitHub for 90 seconds, and to you in
+an interview 3 months from now.
+
+- [ ] Write the real `README.md`: what it is, why double-entry, why idempotency keys, schema
+  diagram, how to run it locally, example `curl` commands
+- [ ] Add a short "Design Decisions" section to the README covering: why integer minor units not
+  floats, why derive balance instead of storing it (and the tradeoff), why idempotency is enforced
+  at the DB layer not just app layer
+- [ ] Clean up `NOTES.md` into 5–6 bullet points of "what I learned" — keep this, it's your
+  interview prep
+- [ ] Tag a `v1.0` release/commit
+- [ ] (Optional, only if time allows) Add a minimal `docker-compose.yml` that brings up the full
+  app + DB with one command, so anyone can run it without setup
+
+**Deliverable:** a GitHub repo a recruiter or interviewer can read in 2 minutes and understand
+exactly what was built and why.
+
+**Done when:** you can walk through the whole system out loud in under 3 minutes, covering: the
+data model, the invariant, idempotency, and one concurrency edge case you handled.
+
+> Status: Not started.
+
+---
+
+## Explicitly Out of Scope for v1 (Don't Build These Yet)
+Keeping this list visible is intentional — scope creep is the main risk to actually finishing.
+
+- Authentication/authorization (not the point of this project — skip it)
+- Multi-currency conversion logic
+- Webhooks/notifications
+- A frontend/UI
+- Reversals/refunds as a separate concept (a reversal is just another balanced transaction —
+  understanding that *is* a good thing to mention in an interview, but don't build special-case code for it in v1)
+- Deployment to cloud infrastructure
+
+If the project is going well and you want a v1.1 stretch goal after Phase 7, reversals-as-transactions
+or a stored/cached balance with a reconciliation job against the derived balance (a real pattern at
+scale) are the two best next steps — but only after v1 is genuinely done and demoable.
+
+---
+
+## Master Checklist (Quick Progress View)
+- [ ] Phase 0 — Project setup complete
+- [ ] Phase 1 — Data contracts frozen and understood
+- [ ] Phase 2 — Schema + migrations complete
+- [ ] Phase 3 — Core ledger engine tested in isolation
+- [ ] Phase 4 — Idempotency enforced and race-condition tested
+- [ ] Phase 5 — REST API complete
+- [ ] Phase 6 — Invariant + concurrency tests passing
+- [ ] Phase 7 — README, design notes, and demo-ready
+
+## Next Immediate Action
+1. **Phase 0** — Set up the repo structure, Docker Compose Postgres, and confirm `go run` connects.
+   Don't open Phase 1 until this is genuinely working end-to-end.
