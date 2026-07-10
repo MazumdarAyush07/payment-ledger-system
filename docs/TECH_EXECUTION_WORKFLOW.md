@@ -94,24 +94,47 @@ something doesn't fit the schema, go back and fix the contract — don't let sch
 **Goal:** Implement the actual ledger logic as a Go package you can unit test in isolation,
 before any HTTP layer touches it. This is the heart of the project.
 
-- [ ] `internal/ledger/post_transaction.go`: function that takes a list of entries, validates the
-  double-entry invariant (sum = 0), and inserts the transaction + entries atomically (DB transaction)
-- [ ] Reject any transaction where entries don't sum to zero — write the validation as its own
-  testable function, not buried inside the DB call
-- [ ] `internal/ledger/get_balance.go`: compute an account's balance by summing its entries
-  (don't store a denormalized `balance` column yet — derive it; this is the "correct but slow"
-  version, and that's intentional for v1)
-- [ ] `internal/ledger/get_statement.go`: return an account's entries in a date range (basic
-  transaction history)
-- [ ] Wrap each operation in a DB transaction (`BEGIN`/`COMMIT`/`ROLLBACK`) — if any entry insert
-  fails, the whole transaction must roll back
+- [x] `internal/ledger/errors.go`: define domain-typed sentinel errors — no raw strings
+  - `ErrUnbalancedTransaction` — entries don't sum to zero → HTTP 422
+  - `ErrMinimumEntriesNotMet` — fewer than 2 entries provided → HTTP 422
+  - `ErrAccountNotFound` — unknown `account_id` in an entry → HTTP 404
+  - `ErrCurrencyMismatch` — entry currency doesn't match account currency → HTTP 422
+- [x] `internal/ledger/engine.go`: define the `Engine` interface and `Service` struct that
+  holds the DB pool — zero HTTP/JSON dependencies; all other files implement methods on this struct
+- [x] `internal/ledger/create_account.go`: `CreateAccount(ctx, name, accountType, currency)`
+  — required for test setup and for the API layer; validates account_type is a known enum value
+- [x] `internal/ledger/post_transaction.go`: `PostTransaction(ctx, idempotencyKey, description,
+  entries[], exchangeRate *float64, rateSource *string)` — validates double-entry invariant
+  (sum = 0), inserts transaction + entries atomically inside a DB transaction
+- [x] Validate invariants **before** any DB write — pure Go functions, fully unit-testable:
+  - `ValidateBalance(entries)` — sum must equal zero
+  - `ValidateMinEntries(entries)` — at least 2 entries required
+- [x] `internal/ledger/get_balance.go`: `GetBalance(ctx, accountID)` — derives balance via
+  `SELECT SUM(amount) FROM entries WHERE account_id = $1` (no stored balance column)
+- [x] `internal/ledger/get_statement.go`: `GetStatement(ctx, accountID, from, to time.Time)` —
+  returns entries filtered by `posted_at` range (not `created_at` — per data contracts,
+  only fully committed entries appear on a statement)
+- [x] Wrap `PostTransaction` in a DB transaction (`BEGIN`/`COMMIT`/`ROLLBACK`) — if any entry
+  insert fails, the entire transaction rolls back and nothing lands in the DB
+
+**Unit Tests — one `_test.go` per source file:**
+- [x] `internal/ledger/create_account_test.go`: valid account creation; reject unknown account_type
+- [x] `internal/ledger/post_transaction_test.go`:
+  - Balanced entries → transaction + entries land in DB
+  - Unbalanced entries (sum ≠ 0) → `ErrUnbalancedTransaction`, nothing written
+  - Single entry → `ErrMinimumEntriesNotMet`, nothing written
+  - `ValidateBalance` and `ValidateMinEntries` as standalone pure-function unit tests
+    (no DB required for these — test the validation logic in complete isolation)
+- [x] `internal/ledger/get_balance_test.go`: zero entries returns 0; known entries return correct sum
+- [x] `internal/ledger/get_statement_test.go`: entries outside `posted_at` range are excluded;
+  entries within range are returned in correct order
 
 **Deliverable:** a `ledger` package with no HTTP/API dependency, fully testable on its own.
 
 **Done when:** you can call `PostTransaction(...)` from a Go test file and see correct rows land
-in Postgres, with an unbalanced transaction correctly rejected.
+in Postgres, with an unbalanced transaction correctly rejected with `ErrUnbalancedTransaction`.
 
-> Status: Not started.
+> Status: ✅ Complete. 22/22 tests pass (`go test ./internal/ledger/... -v`).
 
 ---
 
@@ -257,7 +280,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 - [x] Phase 0 — Project setup complete
 - [x] Phase 1 — Data contracts frozen and understood
 - [x] Phase 2 — Schema + migrations complete
-- [ ] Phase 3 — Core ledger engine tested in isolation
+- [x] Phase 3 — Core ledger engine tested in isolation
 - [ ] Phase 4 — Idempotency enforced and race-condition tested
 - [ ] Phase 5 — REST API complete
 - [ ] Phase 5.5 — Currency conversion module with fallback strategy
