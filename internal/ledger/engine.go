@@ -18,6 +18,7 @@ mock during handler unit tests without needing a real database.
 type Engine interface {
 	CreateAccount(ctx context.Context, req CreateAccountRequest) (*db.Account, error)
 	PostTransaction(ctx context.Context, req PostTransactionRequest) (*db.Transaction, error)
+	GetTransaction(ctx context.Context, transactionID uuid.UUID) (*TransactionDetail, error)
 	GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
 	GetStatement(ctx context.Context, accountID uuid.UUID, from, to time.Time) ([]db.Entry, error)
 }
@@ -68,4 +69,14 @@ type PostTransactionRequest struct {
 	Entries        []EntryInput
 	ExchangeRate   *float64 // nil for same-currency
 	RateSource     *string  // "live" | "stale_cache" | nil
+}
+
+/*
+TransactionDetail is the response type for GetTransaction. It bundles the
+transaction header and all its entries together — the API layer converts this
+to a JSON response without needing a second query.
+*/
+type TransactionDetail struct {
+	Transaction *db.Transaction
+	Entries     []db.Entry
 }

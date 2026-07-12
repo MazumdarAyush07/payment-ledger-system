@@ -3,8 +3,10 @@ package ledger_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
+	"github.com/ayushmazumdar/payment-ledger/internal/db"
 	"github.com/ayushmazumdar/payment-ledger/internal/ledger"
 	"github.com/google/uuid"
 )
@@ -24,7 +26,8 @@ func TestPostTransaction(t *testing.T) {
 	t.Run("Balanced", testPostTransaction_Balanced)
 	t.Run("Unbalanced", testPostTransaction_Unbalanced)
 	t.Run("SingleEntry", testPostTransaction_SingleEntry)
-	t.Run("IdempotencyKey", testPostTransaction_IdempotencyKey)
+	t.Run("IdempotencyKey_Sequential", testPostTransaction_IdempotencyKey)
+	t.Run("IdempotencyKey_Concurrent", testPostTransaction_ConcurrentIdempotencyKey)
 	t.Run("UnknownAccount", testPostTransaction_UnknownAccount)
 }
 
@@ -217,5 +220,94 @@ func testPostTransaction_UnknownAccount(t *testing.T) {
 	})
 	if !errors.Is(err, ledger.ErrAccountNotFound) {
 		t.Errorf("expected ErrAccountNotFound, got %v", err)
+	}
+}
+
+/*
+testPostTransaction_ConcurrentIdempotencyKey is the core Phase 4 test.
+
+It fires 10 goroutines simultaneously, all posting the same idempotency key.
+Without the UNIQUE constraint safety net, multiple goroutines could pass an
+app-level "key exists?" check and both insert — resulting in duplicate rows.
+
+The test asserts:
+  - All goroutines succeed (return without error)
+  - All goroutines return the exact same transaction ID
+  - Exactly one transaction row exists in the database
+  - The balance reflects only one transaction's amount (not N)
+*/
+func testPostTransaction_ConcurrentIdempotencyKey(t *testing.T) {
+	requireDB(t)
+	cleanDB(t)
+
+	src, _ := testService.CreateAccount(context.Background(), ledger.CreateAccountRequest{
+		Name: "Wallet", AccountType: "asset", Currency: "INR",
+	})
+	dst, _ := testService.CreateAccount(context.Background(), ledger.CreateAccountRequest{
+		Name: "Merchant", AccountType: "asset", Currency: "INR",
+	})
+
+	req := ledger.PostTransactionRequest{
+		IdempotencyKey: "concurrent-idem-001",
+		Description:    "Concurrent payment",
+		Entries: []ledger.EntryInput{
+			{AccountID: src.ID, Amount: -10000},
+			{AccountID: dst.ID, Amount: 10000},
+		},
+	}
+
+	const numGoroutines = 10
+	results := make([]*db.Transaction, numGoroutines)
+	errs := make([]error, numGoroutines)
+
+	/* Use a start channel to maximise concurrent overlap across goroutines. */
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // block until all goroutines are ready
+			results[i], errs[i] = testService.PostTransaction(context.Background(), req)
+		}(i)
+	}
+
+	close(start) // release all goroutines at once
+	wg.Wait()
+
+	/* Assert: all goroutines must succeed. */
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: unexpected error: %v", i, err)
+		}
+	}
+
+	/* Assert: all goroutines must return the same transaction ID. */
+	if results[0] == nil {
+		t.Fatal("goroutine 0: got nil result")
+	}
+	firstID := results[0].ID
+	for i, r := range results {
+		if r == nil {
+			t.Errorf("goroutine %d: got nil result", i)
+			continue
+		}
+		if r.ID != firstID {
+			t.Errorf("goroutine %d: idempotency violation — got ID %s, want %s", i, r.ID, firstID)
+		}
+	}
+
+	/*
+		Assert: only one transaction's worth of amount landed.
+		If N duplicate inserts occurred, dst balance would be N×10000.
+		Exactly one transaction means balance == 10000.
+	*/
+	balance, err := testService.GetBalance(context.Background(), dst.ID)
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	if balance != 10000 {
+		t.Errorf("expected balance 10000 (one transaction), got %d — possible duplicate inserts", balance)
 	}
 }

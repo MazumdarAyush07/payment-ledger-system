@@ -40,4 +40,10 @@ var (
 		This is an internal signal; callers should never surface it directly.
 	*/
 	ErrDuplicateIdempotencyKey = errors.New("ledger: idempotency key already exists")
+
+	/*
+		ErrTransactionNotFound is returned when a transaction ID does not exist
+		in the transactions table. HTTP → 404 Not Found.
+	*/
+	ErrTransactionNotFound = errors.New("ledger: transaction not found")
 )

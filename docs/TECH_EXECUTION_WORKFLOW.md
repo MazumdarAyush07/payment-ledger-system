@@ -142,14 +142,18 @@ in Postgres, with an unbalanced transaction correctly rejected with `ErrUnbalanc
 **Goal:** Make `PostTransaction` safe to call twice with the same key — this is the single most
 important "real payments system" behavior to demonstrate.
 
-- [ ] Before inserting, check if `idempotency_key` already exists
-- [ ] If it exists: return the *original* transaction's result, do not re-process
-- [ ] If it doesn't exist: proceed with Phase 3 logic
-- [ ] Handle the race condition: two concurrent requests with the same key should not both pass
+- [x] Before inserting, check if `idempotency_key` already exists
+- [x] If it exists: return the *original* transaction's result, do not re-process
+- [x] If it doesn't exist: proceed with Phase 3 logic
+- [x] Handle the race condition: two concurrent requests with the same key should not both pass
   the "doesn't exist" check and double-insert — use the unique constraint from Phase 2 as the
   actual safety net (catch the constraint violation, fetch and return the existing transaction)
-- [ ] Write a test that fires the same request twice (sequentially) and asserts only one
+- [x] `internal/ledger/get_transaction.go`: `GetTransaction(ctx, id)` — returns transaction
+  header + all entries as `TransactionDetail`; returns `ErrTransactionNotFound` on miss
+- [x] Write a test that fires the same request twice (sequentially) and asserts only one
   transaction + entry set exists
+- [x] Write a concurrent test: 10 goroutines with the same idempotency key fired simultaneously;
+  assert all return same transaction ID and balance reflects exactly one transaction
 
 **Deliverable:** idempotency is enforced at the DB constraint level, not just app-level checks
 (app-level checks alone are not safe under concurrency — this is the actual lesson of this phase).
@@ -157,7 +161,7 @@ important "real payments system" behavior to demonstrate.
 **Done when:** posting the same idempotency key twice produces one transaction, not two, even if
 you call it concurrently from two goroutines in a test.
 
-> Status: Not started.
+> Status: ✅ Complete. 28/28 tests pass under `-race` detector.
 
 ---
 
@@ -281,7 +285,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 - [x] Phase 1 — Data contracts frozen and understood
 - [x] Phase 2 — Schema + migrations complete
 - [x] Phase 3 — Core ledger engine tested in isolation
-- [ ] Phase 4 — Idempotency enforced and race-condition tested
+- [x] Phase 4 — Idempotency enforced and race-condition tested
 - [ ] Phase 5 — REST API complete
 - [ ] Phase 5.5 — Currency conversion module with fallback strategy
 - [ ] Phase 6 — Invariant + concurrency tests passing

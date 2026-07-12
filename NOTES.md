@@ -132,3 +132,114 @@ A Postgres-specific feature that makes `INSERT` return the inserted row immediat
 > "We use parameterized queries exclusively — `$1`, `$2`, etc. The query template and the values travel to Postgres separately, so user input is never interpreted as SQL. SQL injection requires concatenation; parameterized queries eliminate the concatenation entirely."
 
 ---
+
+## Phase 4 — Idempotency Layer
+
+**Why app-layer checks are not enough**
+The naive approach: before inserting, check if the idempotency key already exists. If yes, return early. The problem: two concurrent requests with the same key can both pass the check before either has committed. Both see "key doesn't exist", both insert, you now have duplicate rows. This is a classic TOCTOU (time-of-check to time-of-use) race.
+
+**The UNIQUE constraint is the actual safety net**
+The DB-layer `UNIQUE` constraint on `transactions.idempotency_key` makes the race impossible. Only one `INSERT` can win — the other gets a constraint violation. We catch it by error code `23505` (Postgres unique violation):
+
+```go
+var pgErr *pgconn.PgError
+if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+    // Key already exists — fetch and return the original transaction
+    return s.getTransactionByKey(ctx, req.IdempotencyKey)
+}
+```
+
+No app-level lock, no SELECT before INSERT. The DB handles the race atomically.
+
+**Why the "check then act" pattern is never safe under concurrency**
+Any sequence of "read → decide → write" can be interrupted between steps by another goroutine or process. The only truly safe pattern is to make the write itself enforce the constraint — let the DB reject duplicates, then react to the rejection. This applies beyond idempotency: it's the same reason you use `INSERT ... ON CONFLICT` or `UPDATE ... WHERE version = $1` (optimistic locking) instead of "read balance, check, write balance".
+
+**How to write a meaningful concurrency test in Go**
+Use a channel as a start gun to maximise goroutine overlap:
+```go
+start := make(chan struct{})
+for i := 0; i < 10; i++ {
+    go func(i int) {
+        <-start  // all goroutines block here
+        results[i], errs[i] = postTransaction(req)
+    }(i)
+}
+close(start)  // releases all 10 goroutines simultaneously
+wg.Wait()
+```
+Without the channel, goroutines launch sequentially and the "concurrent" test is really just sequential with goroutine overhead — it wouldn't catch the race.
+
+**Run tests with `-race`**
+Go's race detector (`go test -race`) instruments memory accesses and reports data races at runtime. It doesn't prove absence of races (it only catches races that actually occur during the test run), but it's the standard tool. All Phase 4 tests pass clean under `-race`.
+
+**One-liner for interviews:**
+> "Idempotency is enforced by a UNIQUE constraint on the DB, not application-level checks. App checks have a TOCTOU race — two requests can both pass the check before either commits. The constraint makes the write itself atomic: only one succeeds, we catch the `23505` violation and return the original result."
+
+---
+
+## Go Concepts — Goroutines
+
+**What is a goroutine?**
+A goroutine is Go's unit of concurrent execution. You launch one by putting `go` in front of a function call:
+```go
+go func() {
+    doSomething()
+}()
+```
+It runs independently — the calling code doesn't wait for it. Unlike OS threads, goroutines are extremely cheap (~2 KB stack at startup vs. ~1 MB for a thread). A Go program can run tens of thousands of goroutines on a handful of OS threads. The Go runtime multiplexes them automatically.
+
+**Goroutine vs. thread**
+| | OS Thread | Goroutine |
+|---|---|---|
+| Stack size | ~1 MB fixed | ~2 KB, grows as needed |
+| Creation cost | Expensive (kernel call) | ~200ns |
+| Managed by | OS scheduler | Go runtime |
+| Typical count | Hundreds | Tens of thousands |
+
+**`sync.WaitGroup` — waiting for goroutines to finish**
+Goroutines fire and forget by default. `WaitGroup` is how you wait for a group of them to all complete:
+```go
+var wg sync.WaitGroup
+wg.Add(1)       // tell the group: one more goroutine is starting
+go func() {
+    defer wg.Done()  // decrement when this goroutine finishes
+    doWork()
+}()
+wg.Wait()       // block here until count reaches 0
+```
+
+**How goroutines are used in the concurrent idempotency test**
+The goal was to simulate 10 real HTTP requests arriving at the exact same millisecond with the same idempotency key. Without goroutines, you'd test them one at a time — that's not a concurrency test, it's just 10 sequential calls.
+
+```go
+const numGoroutines = 10
+start := make(chan struct{})  // empty channel used as a signal
+
+for i := 0; i < numGoroutines; i++ {
+    wg.Add(1)
+    go func(i int) {
+        defer wg.Done()
+        <-start  // all 10 goroutines park here, waiting for the signal
+        results[i], errs[i] = testService.PostTransaction(ctx, req)
+    }(i)
+}
+
+close(start)  // closing a channel unblocks ALL receivers simultaneously
+wg.Wait()     // wait for all 10 to finish
+```
+
+The `close(start)` trick: closing a channel causes every goroutine blocked on `<-start` to unblock at the same moment. This is the closest you can get to "fire all at once" in a test — without it, goroutines start one-by-one in a loop and the "concurrent" window is much smaller.
+
+**What the test actually proves**
+Without the DB-layer `UNIQUE` constraint, some of the 10 goroutines would race past any app-level check and both insert — resulting in duplicate transaction rows and a `dst` balance of `N × 10000` instead of `10000`. The test asserts:
+1. All goroutines return without error (the losers get the original tx back, not a crash)
+2. All return the same transaction ID (no duplicates)
+3. `GetBalance(dst)` == `10000`, not `100000` (only one transaction posted)
+
+**How this makes the app safe in production**
+In production, every HTTP request runs in its own goroutine (Go's `net/http` does this automatically). A payment API under load will have hundreds of goroutines hitting `PostTransaction` simultaneously. The concurrent test proves that even under that exact scenario — with the worst possible timing — the ledger invariant holds: one idempotency key = one transaction, no matter how many goroutines try to create it at once.
+
+**One-liner for interviews:**
+> "Go's `net/http` handles each request in its own goroutine automatically. Our concurrent test uses 10 goroutines with a channel start gun to simulate exactly that — multiple requests landing simultaneously with the same idempotency key — and proves the DB constraint, not our app code, is what makes it safe."
+
+---
