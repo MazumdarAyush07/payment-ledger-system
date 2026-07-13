@@ -169,14 +169,16 @@ you call it concurrently from two goroutines in a test.
 **Goal:** Expose the ledger engine over HTTP. Keep the API thin — it should call into the
 `ledger` package, not contain business logic itself.
 
-- [ ] `POST /accounts` — create an account
-- [ ] `GET /accounts/{id}/balance` — current balance
-- [ ] `GET /accounts/{id}/statement` — entry history (paginated)
-- [ ] `POST /transactions` — post a transaction (body includes `idempotency_key`, `entries[]`)
-  - Required header: `Idempotency-Key` (standard practice — mirror how Stripe does it)
-- [ ] `GET /transactions/{id}` — fetch a transaction and its entries
-- [ ] Basic input validation middleware (malformed amounts, missing fields → 400, not 500)
-- [ ] Consistent error response shape (`{"error": "..."}`) across all endpoints
+- [x] `POST /accounts` — create an account
+- [x] `GET /accounts/{id}/balance` — current balance (includes currency)
+- [x] `GET /accounts/{id}/statement` — entry history filtered by posted_at range
+- [x] `POST /transactions` — post a transaction
+  - `Idempotency-Key` header takes precedence over body field
+- [x] `GET /transactions/{id}` — fetch a transaction and its entries
+- [x] `GET /accounts/{id}` — fetch account by ID (used internally for balance currency lookup)
+- [x] Basic input validation (malformed amounts, missing fields → 400, not 500)
+- [x] Consistent error response shape (`{"error": "..."}`) across all endpoints
+- [x] Sentinel error → HTTP status mapping (`ErrAccountNotFound` → 404, `ErrUnbalancedTransaction` → 422, etc.)
 
 **Deliverable:** a running HTTP server (use `net/http` + a light router like `chi`, or `Gin`/`Fiber`
 if you prefer — either is a reasonable, defensible choice).
@@ -184,7 +186,7 @@ if you prefer — either is a reasonable, defensible choice).
 **Done when:** you can `curl` every endpoint above and get correct, sane responses, including
 correct error codes for bad input.
 
-> Status: Not started.
+> Status: ✅ Complete. All endpoints verified via curl. Server runs on :8080.
 
 ---
 
@@ -286,7 +288,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 - [x] Phase 2 — Schema + migrations complete
 - [x] Phase 3 — Core ledger engine tested in isolation
 - [x] Phase 4 — Idempotency enforced and race-condition tested
-- [ ] Phase 5 — REST API complete
+- [x] Phase 5 — REST API complete
 - [ ] Phase 5.5 — Currency conversion module with fallback strategy
 - [ ] Phase 6 — Invariant + concurrency tests passing
 - [ ] Phase 7 — README, design notes, and demo-ready

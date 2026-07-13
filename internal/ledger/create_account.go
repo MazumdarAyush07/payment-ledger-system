@@ -64,3 +64,23 @@ func (s *Service) accountExists(ctx context.Context, id uuid.UUID) (bool, error)
 	}
 	return exists, nil
 }
+
+/*
+GetAccount fetches a single account by ID. Returns ErrAccountNotFound if the
+ID does not exist. Used by the API layer to include currency in balance responses.
+*/
+func (s *Service) GetAccount(ctx context.Context, accountID uuid.UUID) (*db.Account, error) {
+	const q = `
+		SELECT id, name, account_type, currency, created_at
+		FROM accounts
+		WHERE id = $1
+	`
+	var a db.Account
+	err := s.pool.QueryRow(ctx, q, accountID).Scan(
+		&a.ID, &a.Name, &a.AccountType, &a.Currency, &a.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountID)
+	}
+	return &a, nil
+}

@@ -17,6 +17,7 @@ mock during handler unit tests without needing a real database.
 */
 type Engine interface {
 	CreateAccount(ctx context.Context, req CreateAccountRequest) (*db.Account, error)
+	GetAccount(ctx context.Context, accountID uuid.UUID) (*db.Account, error)
 	PostTransaction(ctx context.Context, req PostTransactionRequest) (*db.Transaction, error)
 	GetTransaction(ctx context.Context, transactionID uuid.UUID) (*TransactionDetail, error)
 	GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error)

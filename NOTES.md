@@ -243,3 +243,223 @@ In production, every HTTP request runs in its own goroutine (Go's `net/http` doe
 > "Go's `net/http` handles each request in its own goroutine automatically. Our concurrent test uses 10 goroutines with a channel start gun to simulate exactly that — multiple requests landing simultaneously with the same idempotency key — and proves the DB constraint, not our app code, is what makes it safe."
 
 ---
+
+## Phase 5 — REST API
+
+**Why a thin API layer matters**
+The HTTP handlers contain no business logic — they decode JSON, call the `ledger.Engine` interface, and encode the response. All rules (double-entry balance, account validation, idempotency) live in the `ledger` package. This means:
+- You can swap the transport (REST → gRPC → CLI) without touching business logic
+- You can test the ledger engine without starting an HTTP server
+- Handler tests only need to check JSON encoding, status codes, and routing — not financial rules
+
+**The interface as a seam**
+`ledger.Engine` is an interface. The handlers depend on it, not on `*ledger.Service`. This means in handler tests you can inject a fake implementation that returns whatever you want — no real DB needed. This is the standard Go pattern for testability: depend on interfaces, not concrete types.
+
+**DTOs — why the API layer owns its own types**
+We define separate request/response structs in `internal/api/dto.go` rather than returning `db.Account`, `db.Transaction` etc. directly. Reasons:
+- DB models are internal implementation details. Exposing them leaks schema to clients.
+- DB field names (`IdempotencyKey`, `RateSource`) might differ from what the API should expose (`idempotency_key`, `rate_source`).
+- We can evolve the DB schema without breaking the API contract, and vice versa.
+
+**Sentinel errors → HTTP status codes**
+The ledger engine returns typed errors (`ErrAccountNotFound`, `ErrUnbalancedTransaction`, etc.). The `mapLedgerError` function in the API layer switches on these to produce the correct HTTP status:
+```go
+switch {
+case errors.Is(err, ledger.ErrAccountNotFound):      → 404
+case errors.Is(err, ledger.ErrUnbalancedTransaction): → 422
+default:                                               → 500
+}
+```
+This is the clean separation: the ledger package says *what* went wrong (domain language), the API layer decides *how to communicate it* (HTTP language). The ledger package never imports `net/http`.
+
+**Idempotency-Key as a header, not just a body field**
+We accept the key both as an `Idempotency-Key` HTTP header and as a body field, with the header taking precedence. This mirrors how Stripe, Braintree, and most major payment APIs do it. Headers are easier to set by load balancers and gateways without modifying the body, and they're a well-established API convention — important to mention in interviews.
+
+**RFC 3339 for timestamps**
+Statement queries take `from` and `to` as RFC 3339 strings (e.g. `2026-01-01T00:00:00Z`). RFC 3339 is a profile of ISO 8601 — it mandates a timezone offset, so there's no ambiguity about whether a timestamp is local time or UTC. Go's `time.Parse(time.RFC3339, ...)` strictly enforces this format and returns a `time.Time` with timezone information intact.
+
+**chi as the router**
+`net/http`'s default mux can't do path parameters like `{id}`. `chi` adds this (and named routes, middleware chaining) while staying 100% compatible with `net/http` — any `http.Handler` works, any standard middleware works. It adds no framework lock-in.
+
+**Middleware stack and what each layer does**
+```
+RequestID   → injects X-Request-Id — makes every request traceable in logs
+requestLogger → structured slog output: method, path, status, duration_ms, request_id
+Recoverer   → catches panics, returns 500 instead of crashing the server
+```
+The order matters: `RequestID` runs first so `requestLogger` can read it.
+
+`middleware.RealIP` was intentionally omitted. It reads `X-Forwarded-For` / `True-Client-IP` headers and overwrites `r.RemoteAddr` — but those headers can be set by anyone. Without a trusted proxy confirming the value, you're letting a client spoof its own IP address (CVEs: GHSA-3fxj-6jh8-hvhx, GHSA-rjr7-jggh-pgcp). The kernel-provided `r.RemoteAddr` is the only trustworthy source at this stage. If a real proxy layer is added later, this decision should be revisited with explicit trusted-IP allowlisting.
+
+**One-liner for interviews:**
+> "The API layer is just translation — JSON in, domain call, JSON out. All financial rules live in the ledger package which has zero `net/http` imports. Sentinel errors bubble up and get mapped to HTTP status codes at the boundary. This means I can test the entire ledger engine without starting a server."
+
+---
+
+## Request / Response Lifecycle — `POST /transactions`
+
+This traces a single `POST /transactions` call from the moment it hits the network to the moment JSON lands back in the client. Every file touched is listed in order.
+
+---
+
+### Step 1 — OS hands the connection to `net/http`
+**File: `cmd/server/main.go`**
+
+`http.ListenAndServe(":8080", router)` is blocking at startup. When a TCP connection arrives, `net/http` accepts it and spawns a new goroutine. That goroutine parses the HTTP request line and headers, then calls `router.ServeHTTP(w, r)`.
+
+---
+
+### Step 2 — Middleware runs, top to bottom
+**File: `internal/api/router.go`**
+
+The chi router wraps every request in the middleware stack before a handler ever runs:
+
+```
+RequestID middleware   → generates a unique ID, sets it on r.Context() and as X-Request-Id header
+requestLogger start    → records start time, wraps ResponseWriter to capture status code later
+Recoverer middleware   → defers a panic handler around everything below
+```
+
+At this point no handler logic has run. The request is just an `*http.Request` moving through a chain of decorators.
+
+---
+
+### Step 3 — chi routes the request to the handler
+**File: `internal/api/router.go`**
+
+chi matches `POST /transactions` against the registered routes and calls `transactions.PostTransaction(w, r)`. Path parameters (like `{id}` on other routes) would be extracted here and stored in the request context.
+
+---
+
+### Step 4 — Handler decodes and validates the HTTP request
+**File: `internal/api/transactions.go` → `PostTransaction`**
+
+```
+json.NewDecoder(r.Body).Decode(&req)
+```
+
+The handler:
+1. Decodes the JSON body into an API-layer `PostTransactionRequest` DTO
+2. Checks if `Idempotency-Key` header is set — overrides body field if present
+3. Validates that `idempotency_key` is non-empty and `entries` is non-empty
+4. Maps `[]api.EntryInput` → `[]ledger.EntryInput` (crossing the package boundary)
+
+If any of these fail, `writeError(w, 400, "...")` is called and the function returns. The ledger engine is never touched.
+
+---
+
+### Step 5 — Handler calls the ledger engine (the domain boundary)
+**File: `internal/api/transactions.go` → `internal/ledger/post_transaction.go`**
+
+```go
+tx, err := h.engine.PostTransaction(r.Context(), ledger.PostTransactionRequest{...})
+```
+
+`h.engine` is the `ledger.Engine` interface. The concrete type behind it is `*ledger.Service`. This is the boundary between transport and domain.
+
+---
+
+### Step 6 — Pure validations (no DB)
+**File: `internal/ledger/post_transaction.go`**
+
+```
+ValidateMinEntries(entries)   → at least 2 entries?
+ValidateBalance(entries)      → sum of all amounts == 0?
+```
+
+These are pure functions. If either fails, the engine returns a typed sentinel error (`ErrMinimumEntriesNotMet`, `ErrUnbalancedTransaction`). No database has been touched. The handler receives the error, calls `mapLedgerError` → writes a 422 response.
+
+---
+
+### Step 7 — Account existence check (DB read)
+**File: `internal/ledger/post_transaction.go` → `internal/ledger/create_account.go`**
+
+```go
+for _, e := range entries {
+    exists, _ := s.accountExists(ctx, e.AccountID)
+    if !exists { return ErrAccountNotFound }
+}
+```
+
+`accountExists` runs `SELECT EXISTS(...)` against Postgres via the connection pool. If any account ID doesn't exist, `ErrAccountNotFound` is returned → handler maps to 404.
+
+---
+
+### Step 8 — Atomic DB transaction (BEGIN → INSERT → UPDATE → COMMIT)
+**File: `internal/ledger/post_transaction.go`**
+
+```
+pool.Begin(ctx)
+  INSERT INTO transactions → catches 23505 (idempotency_key collision)
+  INSERT INTO entries × N
+  UPDATE transactions SET status = 'posted', posted_at = NOW()
+pool.Commit()
+```
+
+The `defer tx.Rollback()` sits at the top — if anything between Begin and Commit fails, every write is undone atomically. Postgres guarantees all-or-nothing. The ledger engine returns `*db.Transaction` on success.
+
+---
+
+### Step 9 — Engine fetches full detail for the response
+**File: `internal/api/transactions.go` → `internal/ledger/get_transaction.go`**
+
+```go
+detail, _ := h.engine.GetTransaction(r.Context(), tx.ID)
+```
+
+Two queries run:
+1. `SELECT ... FROM transactions WHERE id = $1`
+2. `SELECT ... FROM entries WHERE transaction_id = $1`
+
+These are separate from the write path — the write path returns only the transaction header, so a second read is needed to include entries in the response.
+
+---
+
+### Step 10 — Handler maps domain types to DTOs and writes the response
+**File: `internal/api/transactions.go` → `internal/api/dto.go`**
+
+```go
+writeJSON(w, http.StatusCreated, TransactionDetailResponse{
+    Transaction: transactionToResponse(detail.Transaction),
+    Entries:     entriesToResponse(detail.Entries),
+})
+```
+
+`db.Transaction` → `api.TransactionResponse` (renames fields, formats timestamps).
+`[]db.Entry` → `[]api.EntryResponse`.
+
+`writeJSON` sets `Content-Type: application/json`, writes the status code, and encodes the struct to the `ResponseWriter`.
+
+---
+
+### Step 11 — Middleware finishes (post-handler)
+**File: `internal/api/router.go` → `requestLogger`**
+
+The `requestLogger` middleware deferred `next.ServeHTTP(ww, r)` — after the handler returns, it reads the captured status code from the wrapped `ResponseWriter` and logs:
+
+```
+method=POST path=/transactions status=201 duration_ms=14 request_id=...
+```
+
+The Recoverer middleware's deferred panic handler also runs here (finding nothing to recover from).
+
+---
+
+### Full file trace for `POST /transactions`
+
+```
+cmd/server/main.go               → accepts connection, dispatches to router
+internal/api/router.go           → middleware chain + chi routing
+internal/api/transactions.go     → decode JSON, validate HTTP concerns, call engine
+internal/ledger/post_transaction.go → pure validation, account check, atomic DB write
+internal/ledger/create_account.go   → accountExists() helper
+internal/db/connection.go           → pgxpool executes SQL against Postgres
+internal/ledger/get_transaction.go  → fetch header + entries for response
+internal/api/dto.go                 → map db types → response types
+internal/api/errors.go              → writeJSON / writeError
+internal/api/router.go              → requestLogger logs the completed request
+```
+
+The ledger package (`internal/ledger/`) never imports `net/http`. The api package (`internal/api/`) never contains business logic. The db package (`internal/db/`) never knows about either. Each layer only talks to the one directly below it.
+
+---
