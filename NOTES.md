@@ -463,3 +463,115 @@ internal/api/router.go              → requestLogger logs the completed request
 The ledger package (`internal/ledger/`) never imports `net/http`. The api package (`internal/api/`) never contains business logic. The db package (`internal/db/`) never knows about either. Each layer only talks to the one directly below it.
 
 ---
+
+## Phase 5.5 — Currency Conversion & the `GetRate` Function
+
+### `sync.Mutex` — protecting shared state across goroutines
+
+`net/http` runs every request in its own goroutine. `GetRate` can be called from hundreds of goroutines simultaneously. The `cache` map is shared state — if two goroutines write to it at the same time without coordination, Go will detect a **data race** and crash (or silently corrupt data without the race detector).
+
+`s.mu.Lock()` / `s.mu.Unlock()` ensures only one goroutine accesses the cache at a time:
+
+```go
+s.mu.Lock()
+entry, ok := s.cache[cacheKey]
+s.mu.Unlock()
+```
+
+**Why unlock immediately after the read?** Because `fetchLive` (the HTTP call) can take up to 3 seconds. Holding the lock during a network call would block every other goroutine until it returns. Instead:
+1. Lock → read cache → unlock (microseconds)
+2. HTTP call with no lock held (up to 3 seconds, but not blocking others)
+3. Lock → write result back → unlock (microseconds)
+
+Keep the critical section as short as possible. This is the standard Go pattern.
+
+---
+
+### The `cacheKey` — why concatenate strings
+
+```go
+cacheKey := from + "_" + to
+```
+
+The cache is a `map[string]cachedRate`. We need one key per currency pair. Using a separator ensures `USD_INR` and `INR_USD` are different keys — they are different rates (one is the inverse of the other). Without a separator, two currency codes that happen to share characters could collide.
+
+---
+
+### The layered fallback — step by step
+
+**Function signature:**
+```go
+func (s *RateService) GetRate(ctx context.Context, from, to string) (Rate, error)
+```
+`ctx` carries a deadline. If the caller's request is cancelled mid-flight, the `fetchLive` HTTP call aborts automatically — no manual timeout handling needed.
+
+---
+
+**Same-currency short-circuit:**
+```go
+if from == to {
+    return Rate{..., Value: 1.0, RateSource: "live"}, nil
+}
+```
+No network call, no cache lookup. 1 unit of X always equals 1 unit of X.
+
+---
+
+**Step 1 — Fresh cache:**
+```go
+entry, ok := s.cache[cacheKey]
+
+if ok && time.Since(entry.fetchedAt) < s.liveTTL {
+    return Rate{..., RateSource: "live"}, nil
+}
+```
+
+`entry, ok := map[key]` is Go's two-value map lookup — `ok` is `true` if the key exists, `false` if missing. This avoids a separate `Contains` check.
+
+`time.Since(entry.fetchedAt)` returns the age of the cached rate. If it's under 1 hour (`liveTTL`), return it immediately. `RateSource = "live"` — from the client's perspective it's indistinguishable from a real API fetch.
+
+---
+
+**Step 2 — Live API:**
+```go
+value, fetchedAt, err := s.fetchLive(ctx, from, to)
+if err == nil {
+    s.mu.Lock()
+    s.cache[cacheKey] = cachedRate{value: value, fetchedAt: fetchedAt}
+    s.mu.Unlock()
+    return Rate{..., RateSource: "live"}, nil
+}
+```
+
+`fetchLive` makes the actual HTTP GET to `api.frankfurter.app`. If it succeeds (`err == nil`), write the new rate into the cache and return. The success branch uses `if err == nil` rather than `if err != nil` — the error case deliberately falls through to step 3.
+
+---
+
+**Step 3 — Stale cache (graceful degradation):**
+```go
+if ok && time.Since(entry.fetchedAt) < s.staleTTL {
+    return Rate{..., RateSource: "stale_cache"}, nil
+}
+```
+
+`ok` and `entry` are still in scope from step 1 — Go variables live for their entire enclosing function, not just the block where they were declared. If the cached entry is less than 24 hours old, serve it despite the API being down.
+
+`RateSource = "stale_cache"` is stored on the transaction row. Auditors can see that the rate came from a cache, not a live fetch. This is **graceful degradation** — the system stays available during upstream outages, at the cost of slightly stale rates.
+
+---
+
+**Step 4 — Hard fail:**
+```go
+return Rate{}, fmt.Errorf("%w: %s→%s: %v", ErrRateUnavailable, from, to, err)
+```
+
+`%w` **wraps** `ErrRateUnavailable` inside the error. This means callers can use `errors.Is(err, ErrRateUnavailable)` to check the error type without string matching — the sentinel survives being wrapped in extra context. `%s→%s` adds the currency pair. `%v` appends the underlying API error for logs.
+
+The API layer catches `ErrRateUnavailable` and returns `503 Service Unavailable` — the correct HTTP signal that a dependency is down and the client should retry later.
+
+---
+
+**One-liner for interviews:**
+> "The RateService has three levels of availability. First it checks an in-memory cache with a 1-hour TTL — no network call at all. If stale, it tries the live API. If the API is down, it falls back to the stale cache for up to 24 hours and marks `rate_source = stale_cache` on the transaction for auditability. Only if there's no cache at all does it hard-fail with 503. The mutex only wraps the map reads and writes — not the HTTP call — so parallel requests never block each other."
+
+---

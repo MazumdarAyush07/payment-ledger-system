@@ -63,6 +63,11 @@ type EntryInput struct {
 PostTransactionRequest carries all input needed to post a double-entry
 transaction. ExchangeRate and RateSource are populated by the currency
 conversion layer (Phase 5.5) and are nil for same-currency transactions.
+
+All entries must sum to zero — the zero-balance invariant is always enforced
+in the ledger engine. For cross-currency transactions the API handler converts
+all entry amounts to the target currency before calling PostTransaction,
+guaranteeing balance by construction.
 */
 type PostTransactionRequest struct {
 	IdempotencyKey string

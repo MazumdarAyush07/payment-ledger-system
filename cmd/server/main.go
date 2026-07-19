@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/ayushmazumdar/payment-ledger/internal/api"
+	"github.com/ayushmazumdar/payment-ledger/internal/currency"
 	"github.com/ayushmazumdar/payment-ledger/internal/db"
 	"github.com/ayushmazumdar/payment-ledger/internal/ledger"
 	"github.com/joho/godotenv"
@@ -42,12 +43,16 @@ func main() {
 	/* Step 2: Wire the ledger engine */
 	engine := ledger.NewService(pool)
 
-	/* Step 3: Wire the HTTP handlers and router */
+	/* Step 3: Wire the currency rate service */
+	rateService := currency.NewRateService(nil) // nil → production http.Client with 3s timeout
+	slog.Info("currency rate service initialised")
+
+	/* Step 4: Wire the HTTP handlers and router */
 	accounts := api.NewAccountHandler(engine)
-	transactions := api.NewTransactionHandler(engine)
+	transactions := api.NewTransactionHandler(engine, rateService)
 	router := api.NewRouter(accounts, transactions)
 
-	/* Step 4: Start the HTTP server */
+	/* Step 5: Start the HTTP server */
 	addr := ":" + port
 	slog.Info("server starting", "addr", addr)
 	if err := http.ListenAndServe(addr, router); err != nil {

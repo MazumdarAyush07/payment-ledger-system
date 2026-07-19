@@ -27,7 +27,17 @@ type PostTransactionRequest struct {
 	IdempotencyKey string       `json:"idempotency_key"`
 	Description    string       `json:"description"`
 	Entries        []EntryInput `json:"entries"`
+	/*
+		FromCurrency and ToCurrency are required ISO 4217 currency codes.
+		Set both to the same currency for a same-currency transaction (no conversion).
+		Set them to different currencies to trigger cross-currency conversion via
+		the rate service — all entry amounts are converted to ToCurrency before
+		posting to the ledger so the zero-balance invariant is always preserved.
+	*/
+	FromCurrency string `json:"from_currency"`
+	ToCurrency   string `json:"to_currency"`
 }
+
 
 /* StatementQuery holds validated query parameters for GET /accounts/{id}/statement. */
 type StatementQuery struct {

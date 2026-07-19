@@ -59,7 +59,7 @@ If any step fails, the DB transaction is rolled back and nothing lands in
 the database. The caller receives a typed error they can act on.
 */
 func (s *Service) PostTransaction(ctx context.Context, req PostTransactionRequest) (*db.Transaction, error) {
-	/* Step 1 & 2: Pure validations (no DB) */
+	/* Step 1 & 2: Pure validations — always enforced, no exceptions. */
 	if err := ValidateMinEntries(req.Entries); err != nil {
 		return nil, err
 	}

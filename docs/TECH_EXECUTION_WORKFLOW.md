@@ -196,18 +196,23 @@ with a layered fallback strategy that keeps the system available even when the e
 service is down. Demonstrates real HTTP client engineering, graceful degradation, and
 caching patterns.
 
-- [ ] Create `internal/currency/` package — zero dependency on ledger or API packages
-- [ ] Implement `RateService` that fetches live rates from `frankfurter.app` (free, no key required)
+- [x] Created `internal/currency/` package — zero dependency on ledger or api packages
+- [x] Implemented `RateService` fetching live rates from `frankfurter.app`
   - `GET https://api.frankfurter.app/latest?from=USD&to=INR`
-- [ ] Add in-memory rate cache with a **1-hour TTL** (use `sync.Mutex` + timestamp, no Redis)
-- [ ] Implement **layered fallback strategy**:
-  1. Try primary API (3-second timeout)
-  2. On failure → serve stale cache **if age < 24 hours** (`rate_source: stale_cache`)
-  3. No cache or cache > 24 hours old → hard fail with `503 Service Unavailable`
-- [ ] Expose `Convert(amount int64, from, to string) (int64, Rate, error)` — pure function, testable
-- [ ] Store `exchange_rate` (float64) and `rate_source` (`live` / `stale_cache`) on the transaction
-- [ ] Wire into API layer: pre-convert amounts before handing entries to ledger engine
-- [ ] Unit tests for the fallback logic (mock the HTTP client)
+- [x] In-memory rate cache with 1-hour TTL (`sync.Mutex` + timestamp, no Redis)
+- [x] Layered fallback strategy:
+  1. Fresh cache (< 1 hour) → serve cached, `rate_source: "live"`
+  2. Live API succeeds → update cache, `rate_source: "live"`
+  3. API down + stale cache (< 24 hours) → `rate_source: "stale_cache"`
+  4. API down + no cache or cache ≥ 24 hours → `ErrRateUnavailable` → 503
+- [x] `Fetcher` interface on `http.Client` — allows mock injection in tests
+- [x] `SetTTLs` test helper to control cache expiry without real `time.Sleep`
+- [x] `Convert(ctx, amount, from, to)` — returns converted amount + `Rate` struct
+- [x] `exchange_rate` (float64) and `rate_source` stored on the transaction
+- [x] Wired into API layer — `PostTransactionRequest` accepts `from_currency` / `to_currency`;
+  handler converts **all** entry amounts to the target currency before calling the engine,
+  so entries always sum to zero — the zero-balance invariant is never bypassed
+- [x] 7/7 unit tests for fallback logic using mock HTTP client
 
 **Deliverable:** `internal/currency/` package with live rate fetching, in-memory caching, and
 stale-cache fallback. Cross-currency transactions store the rate used for full auditability.
@@ -215,7 +220,7 @@ stale-cache fallback. Cross-currency transactions store the rate used for full a
 **Done when:** A cross-currency `POST /transactions` succeeds with live rates, and a mocked
 API-down scenario correctly serves a stale cached rate (or fails cleanly if cache is too old).
 
-> Status: Not started.
+> Status: ✅ Complete. 7/7 currency tests pass. Full build verified.
 
 ---
 
@@ -225,6 +230,10 @@ in an interview — "I wrote tests proving the ledger can never go out of balanc
 
 - [ ] Unit tests for `PostTransaction` (balanced entries succeed, unbalanced entries rejected)
 - [ ] Unit tests for idempotency (duplicate key → same result, no duplicate rows)
+- [ ] Idempotency parameter mismatch detection: hash the request entries at write time and store
+  the hash on the `transactions` row; if the same key arrives with a different payload, return
+  `409 Conflict` — prevents silent data loss when a client reuses a key with a different amount
+  (requires a schema migration to add a `request_hash` column)
 - [ ] Integration test: post 50+ random valid transactions across a handful of accounts, then
   assert the **global invariant**: sum of all entries across the entire ledger = 0
 - [ ] Concurrency test: fire N concurrent `PostTransaction` calls (some with shared idempotency
@@ -289,7 +298,7 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 - [x] Phase 3 — Core ledger engine tested in isolation
 - [x] Phase 4 — Idempotency enforced and race-condition tested
 - [x] Phase 5 — REST API complete
-- [ ] Phase 5.5 — Currency conversion module with fallback strategy
+- [x] Phase 5.5 — Currency conversion module with fallback strategy
 - [ ] Phase 6 — Invariant + concurrency tests passing
 - [ ] Phase 7 — README, design notes, and demo-ready
 
