@@ -26,6 +26,7 @@ PostedAt is nil until the transaction is atomically committed.
 type Transaction struct {
 	ID             uuid.UUID
 	IdempotencyKey string
+	RequestHash    string
 	Description    string
 	Status         string // "pending" | "posted" | "failed"
 	ExchangeRate   *float64

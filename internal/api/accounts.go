@@ -180,6 +180,8 @@ func mapLedgerError(w http.ResponseWriter, err error) {
 		errors.Is(err, ledger.ErrMinimumEntriesNotMet),
 		errors.Is(err, ledger.ErrCurrencyMismatch):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, ledger.ErrIdempotencyConflict):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}

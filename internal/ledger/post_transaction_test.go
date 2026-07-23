@@ -27,6 +27,7 @@ func TestPostTransaction(t *testing.T) {
 	t.Run("Unbalanced", testPostTransaction_Unbalanced)
 	t.Run("SingleEntry", testPostTransaction_SingleEntry)
 	t.Run("IdempotencyKey_Sequential", testPostTransaction_IdempotencyKey)
+	t.Run("IdempotencyKey_Mismatch", testPostTransaction_IdempotencyMismatch)
 	t.Run("IdempotencyKey_Concurrent", testPostTransaction_ConcurrentIdempotencyKey)
 	t.Run("UnknownAccount", testPostTransaction_UnknownAccount)
 }
@@ -203,6 +204,46 @@ func testPostTransaction_IdempotencyKey(t *testing.T) {
 
 	if tx1.ID != tx2.ID {
 		t.Errorf("idempotency violation: different transaction IDs: %s vs %s", tx1.ID, tx2.ID)
+	}
+}
+
+func testPostTransaction_IdempotencyMismatch(t *testing.T) {
+	requireDB(t)
+	cleanDB(t)
+
+	src, _ := testService.CreateAccount(context.Background(), ledger.CreateAccountRequest{
+		Name: "Wallet", AccountType: "asset", Currency: "INR",
+	})
+	dst, _ := testService.CreateAccount(context.Background(), ledger.CreateAccountRequest{
+		Name: "Merchant", AccountType: "asset", Currency: "INR",
+	})
+
+	req1 := ledger.PostTransactionRequest{
+		IdempotencyKey: "test-mismatch-001",
+		Description:    "Initial payment",
+		Entries: []ledger.EntryInput{
+			{AccountID: src.ID, Amount: -10000},
+			{AccountID: dst.ID, Amount: 10000},
+		},
+	}
+
+	req2 := ledger.PostTransactionRequest{
+		IdempotencyKey: "test-mismatch-001",
+		Description:    "Different payload payment",
+		Entries: []ledger.EntryInput{
+			{AccountID: src.ID, Amount: -50000},
+			{AccountID: dst.ID, Amount: 50000},
+		},
+	}
+
+	_, err := testService.PostTransaction(context.Background(), req1)
+	if err != nil {
+		t.Fatalf("first PostTransaction: %v", err)
+	}
+
+	_, err = testService.PostTransaction(context.Background(), req2)
+	if !errors.Is(err, ledger.ErrIdempotencyConflict) {
+		t.Fatalf("expected ErrIdempotencyConflict, got %v", err)
 	}
 }
 

@@ -575,3 +575,156 @@ The API layer catches `ErrRateUnavailable` and returns `503 Service Unavailable`
 > "The RateService has three levels of availability. First it checks an in-memory cache with a 1-hour TTL — no network call at all. If stale, it tries the live API. If the API is down, it falls back to the stale cache for up to 24 hours and marks `rate_source = stale_cache` on the transaction for auditability. Only if there's no cache at all does it hard-fail with 503. The mutex only wraps the map reads and writes — not the HTTP call — so parallel requests never block each other."
 
 ---
+
+## Phase 6 — Tests & Invariant Checks
+
+### The global zero-sum invariant — what it actually proves
+
+The centrepiece of Phase 6 is one SQL query:
+
+```sql
+SELECT COALESCE(SUM(amount), 0) FROM entries;
+```
+
+If this returns `0` after any number of transactions, the double-entry invariant holds across the entire ledger — not just per-transaction. This is a meaningful guarantee because the invariant could theoretically hold per-transaction (each individual call was balanced) while still being violated globally if a bug caused partial writes, duplicate entries, or missing entries under concurrency.
+
+The test posts 60 random transactions across 5 accounts with random amounts, then runs this query. The result must be `0`. It doesn't matter which accounts were involved or what amounts moved — if every debit has a matching credit, the sum is always zero. This is the mathematical property that double-entry bookkeeping is built on.
+
+**One-liner for interviews:**
+> "I wrote a test that posts 60 random transactions across 5 accounts, then queries `SUM(entries.amount)` directly from Postgres and asserts it equals zero. That's the ledger invariant — it doesn't prove anything about individual transactions, it proves the whole system is balanced. If there were a bug in the write path that dropped an entry, or wrote the same entry twice, this would catch it."
+
+---
+
+### The channel start-gun pattern — maximising goroutine overlap
+
+In both concurrency tests, goroutines are created first and then all released at once:
+
+```go
+start := make(chan struct{})
+
+for i := 0; i < numGoroutines; i++ {
+    wg.Add(1)
+    go func(i int) {
+        defer wg.Done()
+        <-start  // block here until released
+        // ... do work
+    }(i)
+}
+
+close(start)  // release all goroutines simultaneously
+wg.Wait()
+```
+
+**Why not just `go func()` in a loop?** Goroutines spawned in a loop start immediately. By the time goroutine 10 is created, goroutine 1 may have already finished. There's very little actual overlap — you're not really testing concurrency, you're testing sequential execution with overhead.
+
+`close(start)` unblocks all goroutines at once because a read from a closed channel returns immediately. All goroutines hit the DB at the same time, which is what exercises the race conditions you care about: concurrent `INSERT`, concurrent idempotency key checks, concurrent `SELECT FOR UPDATE`.
+
+**When `close(start)` fires:** all goroutines were already blocked on `<-start`. The OS schedules them all to run. With 10-30 goroutines all hitting Postgres simultaneously, the `UNIQUE` constraint on `idempotency_key` and the `FOR UPDATE` advisory lock in `PostTransaction` are the only things preventing duplicate rows. The test proves they hold.
+
+---
+
+### Why split tests into pure unit tests and DB integration tests?
+
+Every test file in `internal/ledger/` calls `requireDB(t)` at the top of any test that needs Postgres. Tests that don't touch the DB (pure validation logic) never call `requireDB`.
+
+```go
+func requireDB(t *testing.T) {
+    t.Helper()
+    if testPool == nil {
+        t.Skip("skipping: DATABASE_URL not set or DB unreachable")
+    }
+}
+```
+
+This means `go test ./...` always passes — even in CI without a database, even in an editor sandbox, even on a machine that has never run Docker. Pure validation logic is always tested. DB tests skip gracefully and are run explicitly with a live database.
+
+**The tradeoff:** you have to be disciplined about what belongs in pure tests vs. integration tests. `ValidateBalance` and `ValidateMinEntries` are pure — they take a slice of entries and return an error, no I/O. `PostTransaction` end-to-end is an integration test because it involves inserting rows, checking constraints, and reading back data.
+
+---
+
+### Mock Engine for httptest — testing the HTTP layer in isolation
+
+The API handler tests use `httptest.NewRecorder()` and a mock that implements `ledger.Engine`:
+
+```go
+type mockEngine struct {
+    postTransactionFn func(ctx context.Context, req ledger.PostTransactionRequest) (*db.Transaction, error)
+    // ... one field per interface method
+}
+```
+
+Each test sets only the functions it needs. For a `GetBalance_NotFound` test, only `getBalanceFn` and `getAccountFn` are set — the rest are nil and will panic if accidentally called, which surfaces bugs immediately.
+
+**Why test through the full router, not the handler directly?**
+
+```go
+func newTestRouter(engine ledger.Engine) http.Handler {
+    accounts := api.NewAccountHandler(engine)
+    transactions := api.NewTransactionHandler(engine, nil)
+    return api.NewRouter(accounts, transactions)
+}
+```
+
+Using `api.NewRouter` means the test exercises chi's routing (correct path params extracted), the request-ID middleware (headers set), and the request logger — the full stack, not just the handler function. A handler test that bypasses the router wouldn't catch a routing bug like `/accounts/{id}` accidentally matching `/accounts/{id}/balance`.
+
+---
+
+### The idempotency request_hash — what it protects against
+
+Current idempotency behaviour (without `request_hash`):
+- Same key + same payload → 200, returns original transaction ✅
+- Same key + **different** payload → **200, silently returns original transaction** ❌
+
+The second case is dangerous. A client might reuse a key accidentally (bug in their ID generator), or a retry might corrupt the request body. The server sees a known key and returns `200 OK` — the client thinks it succeeded with the new payload, but the ledger has the original one. Silent data discrepancy.
+
+**The fix**: at write time, compute a SHA-256 hash of the canonical entry set (entries sorted by `account_id + amount`, deterministic) and store it in a `request_hash` column on `transactions`. On replay, recompute the hash from the incoming payload and compare. If they differ:
+
+```json
+409 Conflict
+{ "error": "idempotency key reused with a different payload — suspected client bug" }
+```
+
+This turns a silent failure into a loud, debuggable error. The client is forced to either use a new key or fix their payload. `409 Conflict` is the correct HTTP status — the request is well-formed, but it conflicts with the server's stored state for that key.
+
+**Why SHA-256 and not a direct equality check on the entries?**
+- The hash is O(1) to store (fixed 64-char hex string regardless of how many entries)
+- Comparison is O(1) string equality
+- No need to store the full original request body; the hash is sufficient to detect any change
+
+**One-liner for interviews:**
+> "Idempotency keys protect against duplicate submission. But without a payload hash, the server can't tell if the client reused a key with a different amount — it just silently returns the original transaction. By storing a SHA-256 of the entry set at write time and comparing on replay, we turn that silent discrepancy into an explicit 409 Conflict. Every serious payments API does this — Stripe calls it 'idempotency key conflict'."
+
+---
+
+### Deterministic Hashing: How `computeRequestHash` Works
+
+To make payload verification robust, the hash must represent the *semantic meaning* of the transaction, not just the raw bytes of the HTTP request. 
+
+Consider a client sending a payment between Account A and Account B. A network retry might send the exact same entries, but in a different order:
+1. `[{Account: B, Amount: 100}, {Account: A, Amount: -100}]`
+2. `[{Account: A, Amount: -100}, {Account: B, Amount: 100}]`
+
+These are mathematically identical. If we just hashed the raw JSON request body, the hashes would differ, resulting in a false-positive `409 Conflict`.
+
+To prevent this, `computeRequestHash` uses **canonicalization**:
+
+```go
+func computeRequestHash(entries []EntryInput) string {
+	sorted := make([]EntryInput, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		idI, idJ := sorted[i].AccountID.String(), sorted[j].AccountID.String()
+		if idI != idJ {
+			return idI < idJ
+		}
+		return sorted[i].Amount < sorted[j].Amount
+	})
+    // ...
+```
+
+1. **Copy & Sort**: It creates a copy of the slice to avoid mutating the original request data, then sorts it deterministically (first by Account ID, then by Amount). This guarantees that equivalent transactions always resolve to the exact same order before hashing.
+2. **Direct Hashing**: Instead of marshalling back to JSON, it streams the sorted data directly into a SHA-256 writer: `fmt.Fprintf(hash, "%s:%d;", e.AccountID, e.Amount)`. This avoids JSON reflection overhead and ensures a strict, unambiguous byte representation.
+3. **Hex Encoding**: The raw 32-byte hash is converted to a 64-character hex string for easy, human-readable storage in the `request_hash` database column.
+
+---
+

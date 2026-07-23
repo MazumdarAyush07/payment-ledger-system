@@ -46,4 +46,11 @@ var (
 		in the transactions table. HTTP → 404 Not Found.
 	*/
 	ErrTransactionNotFound = errors.New("ledger: transaction not found")
+
+	/*
+		ErrIdempotencyConflict is returned when an idempotency key is reused,
+		but the request payload does not match the original transaction's payload.
+		HTTP → 409 Conflict.
+	*/
+	ErrIdempotencyConflict = errors.New("ledger: idempotency key reused with different payload")
 )

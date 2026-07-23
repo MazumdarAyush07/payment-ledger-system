@@ -2,8 +2,11 @@ package ledger
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ayushmazumdar/payment-ledger/internal/db"
@@ -78,6 +81,8 @@ func (s *Service) PostTransaction(ctx context.Context, req PostTransactionReques
 		}
 	}
 
+	reqHash := computeRequestHash(req.Entries)
+
 	/* Steps 4–8: Atomic DB transaction */
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -91,18 +96,19 @@ func (s *Service) PostTransaction(ctx context.Context, req PostTransactionReques
 
 	/* Step 5: Insert transaction header (status = 'pending') */
 	const insertTx = `
-		INSERT INTO transactions (idempotency_key, description, exchange_rate, rate_source)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, idempotency_key, description, status, exchange_rate, rate_source, created_at, posted_at
+		INSERT INTO transactions (idempotency_key, request_hash, description, exchange_rate, rate_source)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, idempotency_key, request_hash, description, status, exchange_rate, rate_source, created_at, posted_at
 	`
 	var t db.Transaction
 	err = tx.QueryRow(ctx, insertTx,
 		req.IdempotencyKey,
+		reqHash,
 		req.Description,
 		req.ExchangeRate,
 		req.RateSource,
 	).Scan(
-		&t.ID, &t.IdempotencyKey, &t.Description, &t.Status,
+		&t.ID, &t.IdempotencyKey, &t.RequestHash, &t.Description, &t.Status,
 		&t.ExchangeRate, &t.RateSource, &t.CreatedAt, &t.PostedAt,
 	)
 	if err != nil {
@@ -110,10 +116,17 @@ func (s *Service) PostTransaction(ctx context.Context, req PostTransactionReques
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolationCode {
 			/*
 				Idempotency collision: the key was already committed.
-				Roll back immediately and fetch + return the original transaction.
+				Roll back immediately and fetch the original transaction.
 			*/
 			tx.Rollback(ctx) //nolint:errcheck
-			return s.getTransactionByKey(ctx, req.IdempotencyKey)
+			origTx, fetchErr := s.getTransactionByKey(ctx, req.IdempotencyKey)
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+			if origTx.RequestHash != reqHash {
+				return nil, ErrIdempotencyConflict
+			}
+			return origTx, nil
 		}
 		return nil, fmt.Errorf("ledger: insert transaction: %w", err)
 	}
@@ -154,13 +167,13 @@ Called on an idempotency collision to return the original result to the caller.
 */
 func (s *Service) getTransactionByKey(ctx context.Context, key string) (*db.Transaction, error) {
 	const q = `
-		SELECT id, idempotency_key, description, status, exchange_rate, rate_source, created_at, posted_at
+		SELECT id, idempotency_key, request_hash, description, status, exchange_rate, rate_source, created_at, posted_at
 		FROM transactions
 		WHERE idempotency_key = $1
 	`
 	var t db.Transaction
 	err := s.pool.QueryRow(ctx, q, key).Scan(
-		&t.ID, &t.IdempotencyKey, &t.Description, &t.Status,
+		&t.ID, &t.IdempotencyKey, &t.RequestHash, &t.Description, &t.Status,
 		&t.ExchangeRate, &t.RateSource, &t.CreatedAt, &t.PostedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -178,4 +191,27 @@ func postedAt(t *db.Transaction) time.Time {
 		return *t.PostedAt
 	}
 	return time.Time{}
+}
+
+/*
+computeRequestHash deterministically hashes the core payload of a transaction request.
+We sort the entries by AccountID+Amount so that mathematically identical requests
+produce the exact same hash, even if the entries array arrives in a different order.
+*/
+func computeRequestHash(entries []EntryInput) string {
+	sorted := make([]EntryInput, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		idI, idJ := sorted[i].AccountID.String(), sorted[j].AccountID.String()
+		if idI != idJ {
+			return idI < idJ
+		}
+		return sorted[i].Amount < sorted[j].Amount
+	})
+
+	hash := sha256.New()
+	for _, e := range sorted {
+		fmt.Fprintf(hash, "%s:%d;", e.AccountID.String(), e.Amount)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
