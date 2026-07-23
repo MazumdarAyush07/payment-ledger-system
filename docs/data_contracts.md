@@ -34,6 +34,7 @@ The actual money movement lives in the entries it owns.
 |--------------------|-----------|-----------------------------------------------------------------------------|
 | `id`               | UUID      | Globally unique identifier                                                  |
 | `idempotency_key`  | string    | Client-provided unique key to prevent duplicate processing (see Section 4)  |
+| `request_hash`     | string    | SHA-256 hash of request payload for detecting idempotency mismatch (409)    |
 | `description`      | string    | Human-readable reason (e.g. "Payment for order #1042")                      |
 | `status`           | enum      | `pending` → `posted` → `failed` (see status lifecycle below)                |
 | `created_at`       | timestamp | UTC timestamp: when the transaction was **received** (transaction time)      |

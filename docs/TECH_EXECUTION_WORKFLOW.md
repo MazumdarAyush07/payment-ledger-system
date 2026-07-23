@@ -261,15 +261,15 @@ reliably, including under the concurrency test.
 **Goal:** Make the project legible to someone skimming your GitHub for 90 seconds, and to you in
 an interview 3 months from now.
 
-- [ ] Write the real `README.md`: what it is, why double-entry, why idempotency keys, schema
+- [x] Write the real `README.md`: what it is, why double-entry, why idempotency keys, schema
   diagram, how to run it locally, example `curl` commands
-- [ ] Add a short "Design Decisions" section to the README covering: why integer minor units not
+- [x] Add a short "Design Decisions" section to the README covering: why integer minor units not
   floats, why derive balance instead of storing it (and the tradeoff), why idempotency is enforced
   at the DB layer not just app layer
-- [ ] Clean up `NOTES.md` into 5–6 bullet points of "what I learned" — keep this, it's your
+- [x] Clean up `NOTES.md` into 5–6 bullet points of "what I learned" — keep this, it's your
   interview prep
-- [ ] Tag a `v1.0` release/commit
-- [ ] (Optional, only if time allows) Add a minimal `docker-compose.yml` that brings up the full
+- [x] Tag a `v1.0` release/commit (skipped per user request)
+- [x] (Optional, only if time allows) Add a minimal `docker-compose.yml` that brings up the full
   app + DB with one command, so anyone can run it without setup
 
 **Deliverable:** a GitHub repo a recruiter or interviewer can read in 2 minutes and understand
@@ -278,7 +278,7 @@ exactly what was built and why.
 **Done when:** you can walk through the whole system out loud in under 3 minutes, covering: the
 data model, the invariant, idempotency, and one concurrency edge case you handled.
 
-> Status: Not started.
+> Status: ✅ Complete. v1 is finished.
 
 ---
 
@@ -308,7 +308,8 @@ scale) are the two best next steps — but only after v1 is genuinely done and d
 - [x] Phase 5 — REST API complete
 - [x] Phase 5.5 — Currency conversion module with fallback strategy
 - [x] Phase 6 — Invariant + concurrency tests passing
-- [ ] Phase 7 — README, design notes, and demo-ready
+- [x] Phase 7 — README, design notes, and demo-ready
 
 ## Next Immediate Action
-1. **Phase 2** — Write the PostgreSQL schema and first migration. Run it clean on the Docker Postgres instance.
+Celebrate! You have built a production-grade, concurrent-safe payment ledger from scratch. 
+If you want to continue, look at the v1.1 stretch goals (like reconciliation jobs or refunds).

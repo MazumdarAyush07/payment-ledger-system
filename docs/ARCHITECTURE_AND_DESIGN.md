@@ -70,9 +70,13 @@ erDiagram
     TRANSACTIONS {
         uuid id PK
         string idempotency_key UK "Unique client-provided key"
+        string request_hash "SHA-256 of entries for mismatch detection"
         string description
         string status "pending | posted | failed"
+        float64 exchange_rate "Optional: rate used for cross-currency"
+        string rate_source "live | stale_cache"
         timestamp created_at
+        timestamp posted_at
     }
 
     ENTRIES {
@@ -122,8 +126,16 @@ sequenceDiagram
         DB-->>Engine: Rollback / Conflict Error
         Engine->>DB: SELECT * FROM transactions WHERE idempotency_key = "req_123"
         DB-->>Engine: Existing Transaction Data
-        Engine-->>API: Return Existing Transaction (Idempotent Hit)
-        API-->>Client: 200 OK (Original Response)
+        
+        Note over Engine: Compare request_hash
+        
+        alt Hash Mismatch
+            Engine-->>API: ErrIdempotencyConflict
+            API-->>Client: 409 Conflict (Payload changed)
+        else Hash Matches
+            Engine-->>API: Return Existing Transaction (Idempotent Hit)
+            API-->>Client: 200 OK (Original Response)
+        end
     else Insertion Successful
         loop For each entry
             Engine->>DB: INSERT INTO entries (transaction_id, account_id, amount)
@@ -142,29 +154,30 @@ sequenceDiagram
 payment-ledger-system/
 ├── cmd/
 │   └── server/
-│       └── main.go              # Application entrypoint, dependency injection, graceful shutdown
+│       └── main.go              # Application entrypoint, dependency injection
 ├── internal/
 │   ├── api/                     # HTTP transport layer
 │   │   ├── router.go            # Route definitions and middleware registration
-│   │   ├── handlers.go          # Request decoding, calling ledger engine, JSON encoding
-│   │   └── middleware.go        # Idempotency header extraction, logging, error recovery
+│   │   ├── handlers.go          # Handlers for transactions and accounts
+│   │   ├── handlers_test.go     # API integration tests using mock engine
+│   │   └── middleware.go        # Logging and request ID middleware
+│   ├── currency/                # Currency exchange and caching logic
+│   │   ├── service.go           # External API integration, caching, fallback
+│   │   └── service_test.go      # Mocked API tests
 │   ├── ledger/                  # Pure business logic (Zero HTTP dependencies)
 │   │   ├── engine.go            # Core service struct & interface definition
 │   │   ├── post_transaction.go  # Atomic posting, balance invariants
-│   │   ├── get_balance.go       # Dynamic balance aggregation
-│   │   ├── get_statement.go     # Paginated account history
+│   │   ├── invariant_test.go    # Global concurrency & invariant tests
 │   │   └── errors.go            # Domain-specific typed errors
 │   └── db/                      # Database access layer
-│       ├── connection.go        # Postgres connection pool setup (pgx/sqlx)
+│       ├── connection.go        # Postgres connection pool setup (pgx)
 │       └── models.go            # Go struct representations of DB tables
 ├── migrations/                  # SQL migration files (up/down)
-│   └── 000001_init_schema.up.sql
+│   ├── 00001_init_schema.sql
+│   └── 00002_add_request_hash.sql
 ├── docs/                        # Architectural documentation & data contracts
 │   ├── ARCHITECTURE_AND_DESIGN.md
 │   └── data_contracts.md
-├── tests/                       # End-to-end integration & concurrency invariance tests
-│   ├── concurrency_test.go      # Parallel goroutines hammering idempotency keys
-│   └── invariant_test.go        # Random load test proving global sum == 0
 ├── docker-compose.yml           # Local PostgreSQL container setup
 ├── go.mod
 └── README.md
@@ -172,10 +185,10 @@ payment-ledger-system/
 
 ---
 
-## 7. Next Steps & Phase 0 Execution
+## 7. Project Status
 
-With this design architecture established, we proceed immediately to **Phase 0 (Project Setup)**:
-1. Initialize the directory structure outlined above.
-2. Configure `go mod`.
-3. Create the `docker-compose.yml` for local PostgreSQL 16.
-4. Establish the database connection boilerplates.
+This architecture has been fully implemented as **v1.0**. 
+The system successfully enforces all described invariants, handles idempotency collisions gracefully via the database, and safely processes cross-currency conversions using the layered caching strategy.
+
+For a detailed breakdown of how this architecture was executed phase by phase, refer to [`TECH_EXECUTION_WORKFLOW.md`](TECH_EXECUTION_WORKFLOW.md).
+

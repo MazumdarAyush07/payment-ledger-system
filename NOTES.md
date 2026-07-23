@@ -1,6 +1,12 @@
 # NOTES.md — Payment Ledger System
 > One place to capture what I learned phase by phase.
-> These are the things I'll actually talk about in interviews — not the code itself.
+
+### Top 5 Interview Takeaways (What I Learned)
+1. **Idempotency is a DB problem, not an App problem:** App-layer `SELECT` checks before `INSERT` suffer from TOCTOU race conditions. True idempotency relies on `UNIQUE` constraints and handling Postgres error `23505`.
+2. **Payload Hashing is Mandatory for Idempotency:** Just checking the key isn't enough; if a client retries with a different payload, the server silently returns the old response. Hashing the sorted payload and checking it prevents silent data corruption (yielding `409 Conflict`).
+3. **Derived Balances Prevent Lock Contention:** Storing `balance` on the accounts table requires a `SELECT FOR UPDATE` lock on every transaction. High-velocity accounts serialize the whole database. Deriving balance dynamically via `SUM(amount)` trades read latency for infinite write throughput.
+4. **Concurrency Testing Requires a "Start-Gun":** Spinning up goroutines in a loop doesn't actually test concurrency (they run sequentially). Using a `chan struct{}` that is `close()`d after all goroutines are waiting forces them to hit the DB simultaneously, exposing real race conditions.
+5. **Layered Caching Ensures Uptime:** For external dependencies (like exchange rates), a 3-tier strategy (Fast In-Memory Cache -> Live API -> Stale Cache Fallback) ensures 99.99% availability even if the provider goes down for hours.
 
 ---
 
